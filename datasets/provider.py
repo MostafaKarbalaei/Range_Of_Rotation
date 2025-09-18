@@ -310,38 +310,67 @@ def rotate_tensor_by_batch(batch_data, label):
     return torch.stack(out, dim=0)
 
 
-def rotate_point_by_label_n(batch_data, label, n, distri='sunflower'):
+def rotate_point_by_label_n(batch_data, label, graph, n, use_tensor=False, distri='sunflower'):
     """
-    Rotate a batch by picking n directions on the sphere and mapping each sample's label to one.
-      batch_data: torch.Tensor [B,N,3]
-      label: [B]-like (ints in [0, n-1])
-      n: number of directions
-      distri: 'sunflower' or 'normal'
-    Returns: torch.Tensor [B,N,3]
+    Rotate a batch of point clouds by mapping each sample to one of n spherical directions.
+    BEHAVIOR MATCHES ORIGINAL:
+      - if use_tensor == True: labels are RANDOMIZED per-sample (input 'label' is ignored)
+      - if use_tensor == False: provided 'label' is used as-is
+    Inputs:
+      batch_data: torch.Tensor [B, N, 3]
+      label:      [B]-like (ignored when use_tensor=True)
+      graph:      unused (kept for signature compatibility)
+      n:          int, number of directions
+      distri:     'sunflower' or 'normal'
+    Returns:
+      torch.Tensor [B, N, 3]
     """
+    # ensure tensor
     X = batch_data if isinstance(batch_data, torch.Tensor) else torch.as_tensor(batch_data, dtype=torch.float32)
-    B = X.shape[0]
-    lab = torch.as_tensor(label, dtype=torch.long).view(-1)
+    if X.ndim != 3 or X.shape[-1] != 3:
+        raise ValueError("batch_data must be [B, N, 3]")
+    B, _, _ = X.shape
+    device, dtype = X.device, X.dtype
 
+    # labels: randomize if use_tensor=True (original behavior), else use provided
+    if use_tensor:
+        lab = torch.randint(low=0, high=n, size=(B,), device=device, dtype=torch.long)
+    else:
+        lab = torch.as_tensor(label, dtype=torch.long, device=device).view(-1)
+        if lab.numel() != B:
+            raise ValueError(f"label length ({lab.numel()}) must equal batch size ({B}) when use_tensor=False")
+
+    # build directions
     if distri == 'sunflower':
-        pts = sunflower_distri(n, device=X.device, dtype=X.dtype)  # [n,3]
+        pts = sunflower_distri(n, device=device, dtype=dtype)  # [n,3]
     elif distri == 'normal':
-        pts = normal_distri(n, device=X.device, dtype=X.dtype)
+        pts = normal_distri(n, device=device, dtype=dtype)     # [n,3]
     else:
         raise ValueError("distri must be 'sunflower' or 'normal'")
 
-    # Optional shuffle to mimic original variability
-    pts = pts[torch.randperm(n, device=X.device)]
+    # shuffle directions (original code does a shuffle)
+    perm = torch.randperm(n, device=device)
+    pts = pts[perm]
 
-    out = []
-    ex = torch.tensor([1.0, 0.0, 0.0], device=X.device, dtype=X.dtype)
-    ez = torch.tensor([0.0, 0.0, 1.0], device=X.device, dtype=X.dtype)
-    z0 = torch.tensor(0.0, device=X.device, dtype=X.dtype)
+    # constants for angle computation
+    ex = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype)  # +x
+    ez = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype)  # +z
+    z0 = torch.tensor(0.0, device=device, dtype=dtype)
 
+    outs = []
     for k in range(B):
-        pt = pts[int(lab[k].item())]
-        xy = torch.stack([pt[0], pt[1], z0])
+        pc = X[k]  # [N,3]
+        pt = pts[int(lab[k].item())]  # [3]
+
+        # phi: angle between [x,y,0] and +x
+        xy = torch.stack([pt[0], pt[1], z0])                  # [3]
         phi = compute_angle_tensor(xy.unsqueeze(0), ex.unsqueeze(0))[0]
+
+        # theta: angle between pt and +z
         theta = compute_angle_tensor(pt.unsqueeze(0), ez.unsqueeze(0))[0]
-        out.append(rotate_tensor_by_angle_xyz(X[k], angle_x=theta, angle_z=phi))
-    return torch.stack(out, dim=0)
+
+        # rotate: first around X by theta, then around Z by phi (matches original)
+        pc = rotate_tensor_by_angle_xyz(pc, angle_x=float(theta), angle_z=float(phi))
+        outs.append(pc)
+
+    return torch.stack(outs, dim=0)
