@@ -1,6 +1,3 @@
-# pure_torch_rotations.py
-# Pure PyTorch rotations for point clouds — no TensorFlow, no NumPy.
-
 import math
 import torch
 
